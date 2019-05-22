@@ -221,27 +221,27 @@ typedef void * lv_indev_drv_user_data_t;            /*Type of user data in the i
 /* More info about fonts: https://docs.littlevgl.com/#Fonts
  * To enable a built-in font use 1,2,4 or 8 values
  * which will determine the bit-per-pixel. Higher value means smoother fonts */
-#define LV_USE_FONT_DEJAVU_10              4
-#define LV_USE_FONT_DEJAVU_10_LATIN_SUP    4
-#define LV_USE_FONT_DEJAVU_10_CYRILLIC     4
-#define LV_USE_FONT_SYMBOL_10              4
+#define LV_USE_FONT_DEJAVU_10              0
+#define LV_USE_FONT_DEJAVU_10_LATIN_SUP    0
+#define LV_USE_FONT_DEJAVU_10_CYRILLIC     0
+#define LV_USE_FONT_SYMBOL_10              0
 
 #define LV_USE_FONT_DEJAVU_20              4
-#define LV_USE_FONT_DEJAVU_20_LATIN_SUP    4
-#define LV_USE_FONT_DEJAVU_20_CYRILLIC     4
+#define LV_USE_FONT_DEJAVU_20_LATIN_SUP    0
+#define LV_USE_FONT_DEJAVU_20_CYRILLIC     0
 #define LV_USE_FONT_SYMBOL_20              4
 
-#define LV_USE_FONT_DEJAVU_30              4
-#define LV_USE_FONT_DEJAVU_30_LATIN_SUP    4
-#define LV_USE_FONT_DEJAVU_30_CYRILLIC     4
-#define LV_USE_FONT_SYMBOL_30              4
+#define LV_USE_FONT_DEJAVU_30              0
+#define LV_USE_FONT_DEJAVU_30_LATIN_SUP    0
+#define LV_USE_FONT_DEJAVU_30_CYRILLIC     0
+#define LV_USE_FONT_SYMBOL_30              0
 
-#define LV_USE_FONT_DEJAVU_40              4
-#define LV_USE_FONT_DEJAVU_40_LATIN_SUP    4
-#define LV_USE_FONT_DEJAVU_40_CYRILLIC     4
-#define LV_USE_FONT_SYMBOL_40              4
+#define LV_USE_FONT_DEJAVU_40              0
+#define LV_USE_FONT_DEJAVU_40_LATIN_SUP    0
+#define LV_USE_FONT_DEJAVU_40_CYRILLIC     0
+#define LV_USE_FONT_SYMBOL_40              0
 
-#define LV_USE_FONT_MONOSPACE_8            1
+#define LV_USE_FONT_MONOSPACE_8            0
 
 /* Optionally declare your custom fonts here.
  * You can use these fonts as default font too
@@ -317,7 +317,7 @@ typedef void * lv_obj_user_data_t;
 #define LV_USE_BTNM     1
 
 /*Calendar (dependencies: -)*/
-#define LV_USE_CALENDAR 1
+#define LV_USE_CALENDAR 0
 
 /*Canvas (dependencies: lv_img)*/
 #define LV_USE_CANVAS   1
