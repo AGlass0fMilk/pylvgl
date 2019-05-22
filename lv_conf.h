@@ -459,5 +459,3 @@ typedef void * lv_obj_user_data_t;
 #include "lvgl/src/lv_conf_checker.h"
 
 #endif /*LV_CONF_H*/
-
-#endif /*End of "Content enable"*/
