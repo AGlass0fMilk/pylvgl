@@ -9,6 +9,8 @@ skipfunctions = {
     
     # user_data is used to store reference to Python objects, don't tamper with that!
     'lv_obj_get_user_data',
+    'lv_obj_set_user_data',
+    'lv_obj_get_user_data_ptr',
     
     # Just use Python attributes for custom properties of objects
     'lv_obj_allocate_ext_attr',
@@ -33,11 +35,12 @@ class PythonObject(Object):
         'uint16_t':  ('H', 'unsigned short int'), 
         'int16_t':   ('h', 'short int'),
         'uint32_t':  ('I', 'unsigned int'),
-        'int32_t':  ('I', 'int'),
+        'int32_t':   ('I', 'int'),
+        'int':       ('I', 'int'),
         }
     # TODO: from structs!
 
-    TYPECONV.update({'lv_style_t*':     ('O&', 'lv_style_t *')})
+    TYPECONV.update({'const lv_style_t*':     ('O&', 'lv_style_t *')})
 
     TYPECONV_PARAMETER = TYPECONV.copy()
     TYPECONV_PARAMETER.update({'const lv_obj_t*': ('O!', 'pylv_Obj *')})
@@ -56,8 +59,7 @@ class PythonObject(Object):
             self.base = '&pylv_' + self.ancestor.name + '_Type'
 
     def get_structfields(self, recurse = False):
-        actionfields = [f'PyObject *{action};' for action in self.get_std_actions()]
-        myfields = actionfields + self.customstructfields
+        myfields = self.customstructfields
         
         if not myfields and not recurse:
             return []
@@ -158,15 +160,14 @@ py{method.decl.name}(pylv_Obj *self, PyObject *args, PyObject *kwds)
         elif resfmt == 'O&':
             code += f'''
     LVGL_LOCK        
-    {resctype} result = {callcode};
+    {restype} result = {callcode};
     LVGL_UNLOCK
     return pystruct_from_lv(result);            
 '''
-
         else:
             code += f'''
     LVGL_LOCK        
-    {resctype} result = {callcode};
+    {restype} result = {callcode};
     LVGL_UNLOCK
 '''
             if resfmt == 'p': # Py_BuildValue does not support 'p' (which is supported by PyArg_ParseTuple..)
@@ -178,35 +179,6 @@ py{method.decl.name}(pylv_Obj *self, PyObject *args, PyObject *kwds)
         
         return code + '}\n';
 
-    def build_actioncallbackcode(self, action, attrname):
-        obj = self
-        return f'''
-lv_res_t pylv_{obj.name}_{action}_callback(lv_obj_t* obj) {{
-    pylv_{obj.pyname} *pyobj;
-    PyObject *handler;
-    PyGILState_STATE gstate;
-
-    gstate = PyGILState_Ensure();
-    
-    pyobj = lv_obj_get_free_ptr(obj);
-    if (pyobj) {{
-        handler = pyobj->{attrname};
-        if (handler) {{
-            if (unlock) unlock(unlock_arg); 
-            PyObject_CallFunctionObjArgs(handler, NULL);
-            if (PyErr_Occurred()) PyErr_Print();
-            
-            PyGILState_Release(gstate);
-            if (lock) lock(lock_arg); 
-            return LV_RES_OK;
-
-        }}
-
-    }}
-    PyGILState_Release(gstate);
-    return LV_RES_OK;
-}}
-'''
 
     @property
     def pyname(self): # The name of the class in Python lv_obj --> Obj
@@ -228,56 +200,13 @@ lv_res_t pylv_{obj.name}_{action}_callback(lv_obj_t* obj) {{
     def methodscode(self):
         # Method definitions for the object methods (see also _methodcode function)
         code = ''
-        actiongetset = set()
-        for action in self.get_std_actions():
-            actiongetset.add(self.lv_name + '_get_' + action)
-            actiongetset.add(self.lv_name + '_set_' + action)
-            code += self.build_actioncallbackcode(action, action)
-            code += f'''
-
-static PyObject *
-pylv_{self.name}_get_{action}(pylv_{self.pyname} *self, PyObject *args, PyObject *kwds)
-{{
-    static char *kwlist[] = {{NULL}};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "", kwlist)) return NULL;   
-    
-    PyObject *action = self->{action};
-    if (!action) Py_RETURN_NONE;
-
-    Py_INCREF(action);
-    return action;
-}}
-
-static PyObject *
-pylv_{self.name}_set_{action}(pylv_{self.pyname} *self, PyObject *args, PyObject *kwds)
-{{
-    static char *kwlist[] = {{"action", NULL}};
-    PyObject *action, *tmp;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O", kwlist , &action)) return NULL;
-    
-    tmp = self->{action};
-    if (action == Py_None) {{
-        self->{action} = NULL;
-    }} else {{
-        self->{action} = action;
-        Py_INCREF(action);
-        lv_{self.name}_set_{action}(self->ref, pylv_{self.name}_{action}_callback);
-    }}
-    Py_XDECREF(tmp); // Old action (tmp) could be NULL
-
-    Py_RETURN_NONE;
-}}
-
-            
-'''
             
         for method in self.methods.values():
-            if method.decl.name not in actiongetset:
-                try:
-                    code += self.build_methodcode(method)
-                except MissingConversionException as e:
-                    print(e)
-                    code += f'''
+            try:
+                code += self.build_methodcode(method)
+            except MissingConversionException as e:
+                print(e)
+                code += f'''
 static PyObject*
 py{method.decl.name}(pylv_Obj *self, PyObject *args, PyObject *kwds)
 {{
@@ -439,9 +368,9 @@ class PythonBindingsGenerator(BindingsGenerator):
         
         
         objects = self.objects
-        objects['obj'].customstructfields.extend(['PyObject_HEAD', 'PyObject *weakreflist;', 'lv_obj_t *ref;', 'PyObject *event;', 'lv_event_cb_t orig_c_event_cb;', 'lv_signal_cb_t orig_signal_cb;'])
+        objects['obj'].customstructfields.extend(['PyObject_HEAD', 'PyObject *weakreflist;', 'lv_obj_t *ref;', 'PyObject *event_cb;', 'lv_signal_cb_t orig_signal_cb;'])
 
-        for custom in ('lv_obj_get_children', 'lv_label_get_letter_pos', 'lv_label_get_letter_on', 'lv_list_add' ,'lv_obj_get_type', 'lv_list_focus'):
+        for custom in ('lv_obj_get_children', 'lv_obj_set_event_cb', 'lv_label_get_letter_pos', 'lv_label_get_letter_on', 'lv_list_add' ,'lv_obj_get_type', 'lv_list_focus'):
             
             obj, method = re.match('lv_([A-Za-z0-9]+)_(\w+)$', custom).groups()
             objects[obj].methods[method] = CustomMethod(custom)
@@ -449,9 +378,7 @@ class PythonBindingsGenerator(BindingsGenerator):
         for function in skipfunctions:
             obj, method = re.match('lv_([A-Za-z0-9]+)_(\w+)$', function).groups()
             del objects[obj].methods[method]
-    
-        self.request_enum('lv_btn_action_t') # This enum is used in the custom implementation in Btn.set_action/get_action
-    
+        
     @property
     def struct_inttypes(self):
         
@@ -467,9 +394,14 @@ class PythonBindingsGenerator(BindingsGenerator):
         '''
         while True:
             typedef = self.parseresult.typedefs.get(typestr)
-            if not typedef or not isinstance(typedef.type.type, c_ast.IdentifierType):
-                return typestr
-            typestr = type_repr(typedef.type)
+            if typedef:
+                if isinstance(typedef.type.type, c_ast.IdentifierType):
+                    typestr = type_repr(typedef.type)
+                    continue # Continue dereferencing
+                if isinstance(typedef.type.type, c_ast.Enum):
+                    return 'int' # Enum is represented by an int
+            
+            return typestr
     
            
     def get_ENUM_ASSIGNMENTS(self):
@@ -477,21 +409,31 @@ class PythonBindingsGenerator(BindingsGenerator):
         for enumname, enum in self.parseresult.enums.items():
 
             items = ''.join(f', "{name}", {value}' for name, value in enum.items())
-            ret += f'    PyModule_AddObject(module, "{enumname}", build_enum("{enumname}"{items}, NULL));\n'
+            ret += f'    PyModule_AddObject(module, "{enumname}", build_constclass(\'d\', "{enumname}"{items}, NULL));\n'
         return ret
 
     def get_SYMBOL_ASSIGNMENTS(self):
-        return ''.join(
-            f'    PyModule_AddStringMacro(module, {name});\n'
-            for name in self.parseresult.defines
-            if name.startswith('SYMBOL_')
-            )
-            
+        
+        skip = {'LV_SYMBOL_DEF_H', 'LV_SYMBOL_GLYPH_FIRST', 'LV_SYMBOL_GLYPH_LAST'}
+        
+        items = ''.join(f', "{name[10:]}", {name}' for name in self.parseresult.defines if name.startswith('LV_SYMBOL_') and name not in skip)
+        return f'    PyModule_AddObject(module, "SYMBOL", build_constclass(\'s\', "SYMBOL"{items}, NULL));\n'
+
+    def get_COLOR_ASSIGNMENTS(self):
+        
+        skip = {'LV_COLOR_H', 'LV_COLOR_MAKE'}
+        
+        items = ''.join(f', "{name[9:]}", {name}' for name in self.parseresult.defines if name.startswith('LV_COLOR_') and name not in skip)
+        return f'    PyModule_AddObject(module, "COLOR", build_constclass(\'C\', "COLOR"{items}, NULL));\n'
+    
+    def get_LV_COLOR_TYPE(self):
+        return 'py' + self.deref_typedef('lv_color_t') + '_Type'
+    
     def get_GLOBALS_ASSIGNMENTS(self):
         code = ''
         for name, type in self.parseresult.declarations.items():
             typename = type_repr(type)
-            code += f'   PyModule_AddObject(module, "{name}", Struct_fromglobal(&py{typename}_Type, &{type.declname}, sizeof({typename})));\n'
+            code += f'   PyModule_AddObject(module, "{name}", pystruct_from_c(&py{typename}_Type, &{type.declname}, sizeof({typename}), 0));\n'
             
         return code
 

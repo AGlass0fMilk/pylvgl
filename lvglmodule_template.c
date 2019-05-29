@@ -1,7 +1,7 @@
 #include "Python.h"
 #include "structmember.h"
-#undef B0 // Workaround for lvgl Issue 941 https://github.com/littlevgl/lvgl/issues/941
 #include "lvgl/lvgl.h"
+
 
 #if LV_COLOR_DEPTH != 16
 #error Only 16 bits color depth is currently supported
@@ -60,14 +60,13 @@ static PyTypeObject pylv_{name}_Type;
  ****************************************************************/
 typedef struct {
     PyObject_HEAD
-    void *ptr;
+    const void *ptr;
 } PtrObject;
 static PyTypeObject Ptr_Type;
 
 static PyObject* Ptr_repr(PyObject *self) {
-    void *value = ((PtrObject *)self)->ptr;
     return PyUnicode_FromFormat("<%s object at %p = %p>",
-                                self->ob_type->tp_name, self, value);
+                        self->ob_type->tp_name, self, ((PtrObject *)self)->ptr);
 }
 
 Py_hash_t Ptr_hash(PtrObject *self) {
@@ -113,7 +112,7 @@ static PyTypeObject Ptr_Type = {
     .tp_richcompare = (richcmpfunc) Ptr_richcompare,
 };
 
-PyObject *PtrObject_fromptr(void *ptr) {
+PyObject *PtrObject_fromptr(const void *ptr) {
     PtrObject *ob = PyObject_New(PtrObject, &Ptr_Type);
     if (ob) ob->ptr = ptr;
     return (PyObject*) ob;
@@ -164,7 +163,7 @@ void lv_set_lock_unlock( void (*flock)(void *), void * flock_arg,
  */
 static lv_res_t pylv_signal_cb(lv_obj_t * obj, lv_signal_t sign, void * param)
 {
-    pylv_Obj* py_obj = (pylv_Obj*)(*lv_obj_get_user_data(obj));
+    pylv_Obj* py_obj = (pylv_Obj*)(*lv_obj_get_user_data_ptr(obj));
     
     // store a reference to the original signal callback, since during the
     // CLEANUP signal, py_obj may get deallocated and then this reference is gone
@@ -180,7 +179,7 @@ static lv_res_t pylv_signal_cb(lv_obj_t * obj, lv_signal_t sign, void * param)
             lv_obj_set_signal_cb(obj, py_obj->orig_signal_cb); 
             
             // remove reference to Python object
-            (*lv_obj_get_user_data(obj)) = NULL;
+            (*lv_obj_get_user_data_ptr(obj)) = NULL;
             Py_DECREF(py_obj); 
         }
 
@@ -197,7 +196,7 @@ int check_alive(pylv_Obj* obj) {
 }
 
 static void install_signal_cb(pylv_Obj * py_obj) {
-    py_obj->orig_signal_cb = lv_obj_get_signal_func(py_obj->ref);       /*Save to old signal function*/
+    py_obj->orig_signal_cb = lv_obj_get_signal_cb(py_obj->ref);       /*Save to old signal function*/
     lv_obj_set_signal_cb(py_obj->ref, pylv_signal_cb);
 }
 
@@ -222,7 +221,7 @@ PyObject * pyobj_from_lv(lv_obj_t *obj) {
         Py_RETURN_NONE;
     }
     
-    pyobj = *lv_obj_get_user_data(obj);
+    pyobj = *lv_obj_get_user_data_ptr(obj);
     
     if (!pyobj) {
         // Python object for this lv object does not yet exist. Create a new one
@@ -240,7 +239,7 @@ PyObject * pyobj_from_lv(lv_obj_t *obj) {
         memset(pyobj, 0, tp->tp_basicsize);
         PyObject_Init((PyObject *)pyobj, tp);
         pyobj -> ref = obj;
-        *lv_obj_get_user_data(obj) = pyobj;
+        *lv_obj_get_user_data_ptr(obj) = pyobj;
         install_signal_cb(pyobj);
         // reference count for pyobj is 1 -- the reference stored in the lvgl object user_data
     }
@@ -263,7 +262,7 @@ PyObject * pyobj_from_lv(lv_obj_t *obj) {
  
 static PyObject* struct_dict;
 
-static PyObject *pystruct_from_lv(void *c_struct) {
+static PyObject *pystruct_from_lv(const void *c_struct) {
     PyObject *ret;
     PyObject *ptr;
     ptr = PtrObject_fromptr(c_struct);
@@ -281,55 +280,7 @@ static PyObject *pystruct_from_lv(void *c_struct) {
 }
 
 
-/****************************************************************
- * Custom types: enums                                          *  
- ****************************************************************/
 
-static PyType_Slot enum_slots[] = {
-    {0, 0},
-};
-
-/* Create a new class which represents an enumeration
- * variadic arguments are char* name, int value, ... , NULL
- * representing the enum values
- */
-static PyObject* build_enum(char *name, ...) {
-
-    va_list args;
-    va_start(args, name);
-
-    PyType_Spec spec = {
-        .name = name,
-        .basicsize = sizeof(PyObject),
-        .itemsize = 0,
-        .flags = Py_TPFLAGS_DEFAULT,
-        .slots = enum_slots /* terminated by slot==0. */
-    };
-    
-    PyObject *enum_type = PyType_FromSpec(&spec);
-    if (!enum_type) return NULL;
-    
-    ((PyTypeObject*)enum_type)->tp_new = NULL; // enum objects cannot be instantiated
-    
-    while(1) {
-        char *name = va_arg(args, char*);
-        if (!name) break;
-        
-        PyObject *value;
-        value = PyLong_FromLong(va_arg(args, int));
-        if (!value) goto error;
-        
-        PyObject_SetAttrString(enum_type, name, value);
-        Py_DECREF(value);
-    }
-
-    return enum_type;
-
-error:
-    Py_DECREF(enum_type);
-    return NULL;
-
-}
 
 
 
@@ -341,12 +292,13 @@ typedef struct {
     void *data;
     size_t size;
     PyObject *owner; // NULL = reference to global C data, self=allocated @ init, other object=sharing from that object; decref owner when we are deallocated
+    bool readonly;
 } StructObject;
 
 
 static PyObject*
 Struct_repr(StructObject *self) {
-    return PyUnicode_FromFormat("<%s struct at %p data = %p (%d bytes) owner = %p>", Py_TYPE(self)->tp_name, self, self->data, self->size, self->owner);
+    return PyUnicode_FromFormat("<%s struct at %p %sdata = %p (%d bytes) owner = %p>", Py_TYPE(self)->tp_name, self, (self->readonly? "(readonly) " : ""), self->data, self->size, self->owner);
 }
 
 static void
@@ -362,7 +314,8 @@ Struct_dealloc(StructObject *self)
 
 // Provide a read-write buffer to the binary data in this struct
 static int Struct_getbuffer(PyObject *exporter, Py_buffer *view, int flags) {
-    return PyBuffer_FillInfo(view, exporter, ((StructObject*)exporter)->data, ((StructObject*)exporter)->size, 0, flags);
+    StructObject *self = (StructObject*)exporter;
+    return PyBuffer_FillInfo(view, exporter, self->data, self->size, self->readonly, flags);
 }
 
 static PyBufferProcs Struct_bufferprocs = {
@@ -398,15 +351,26 @@ static int Struct_register(StructObject *obj) {
 // This also adds those Python objects to struct_dict so that they can be
 // returned from object calls
 static PyObject *
-Struct_fromglobal(PyTypeObject *type, void* ptr, size_t size) {
+pystruct_from_c(PyTypeObject *type, const void* ptr, size_t size, bool copy) {
     StructObject *ret = 0;
 
     ret = (StructObject*)PyObject_New(StructObject, type);
     if (!ret) return NULL;
 
-    ret->owner = NULL; // owner = NULL means: global data, do not free
-    ret->data = ptr;
+    if (copy) {
+        ret->data = PyMem_Malloc(size);
+        if (!ret->data) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+        memcpy(ret->data, ptr, size);
+        ret->owner = (PyObject *)ret; // This Python object is the owner of the data; free the data on delete
+    } else {
+        ret->owner = NULL; // owner = NULL means: global data, do not free
+        ret->data = (void*)ptr; // cast const to non-const, but we set readonly to prevent writing
+    }
     ret->size = size;
+    ret->readonly = 1;
     
     if (Struct_register(ret)<0) {
         Py_DECREF(ret);
@@ -449,6 +413,16 @@ static int long_to_int(PyObject *value, long *v, long min, long max) {
     return 0;
 }   
 
+
+static int struct_check_readonly(StructObject *self) {
+    if (self->readonly) {
+        PyErr_SetString(PyExc_ValueError, "setting attribute on read-only struct");
+        return -1;
+    }
+    return 0;
+}
+
+
 /* struct member getter/setter for [u]int(8|16|32)_t */
 <<<struct_inttypes:
 static PyObject *
@@ -461,6 +435,7 @@ static int
 struct_set_{type}(StructObject *self, PyObject *value, void *closure)
 {{
     long v;
+    if (struct_check_readonly(self)) return -1;
     if (long_to_int(value, &v, {min}, {max})) return -1;
     
     *(({type}_t*)((char*)self->data + (int)closure) ) = v;
@@ -481,9 +456,10 @@ struct_get_struct(StructObject *self, struct_closure_t *closure) {
     ret = (StructObject*)PyObject_New(StructObject, closure->type);
     if (ret) {
         ret->owner = self->owner;
-        Py_INCREF(self->owner);
+        if (self->owner) Py_INCREF(self->owner); // owner could be NULL if data is C global
         ret->data = self->data + closure->offset;
         ret->size = closure->size;
+        ret->readonly = self->readonly;
     }
     return (PyObject*)ret;
 
@@ -493,7 +469,7 @@ struct_get_struct(StructObject *self, struct_closure_t *closure) {
 /* Generic setter for atrributes which are a struct
  *
  * Setting can be via either an object of the same type, or via a dict,
- * which is passed as a keyword argument dict to a constructor of the struct
+ * which could be passed as a keyword argument dict to a constructor of the struct
  * for the appropriate type
  *
  * NOTE: if setting items via a dict fails, some items may have been set already
@@ -502,6 +478,10 @@ static int
 struct_set_struct(StructObject *self, PyObject *value, struct_closure_t *closure) {
 
     PyObject *attr = NULL;
+    
+    if (struct_check_readonly(self)) return -1;
+
+    
     if (PyDict_Check(value)) {
         // Set attribute sub-items from dictionary items
     
@@ -529,7 +509,7 @@ struct_set_struct(StructObject *self, PyObject *value, struct_closure_t *closure
     
     int isinstance = PyObject_IsInstance(value, (PyObject *)closure->type);
     
-    if (isinstance == -1) return -1; // error
+    if (isinstance == -1) return -1; // error in PyObject_IsInstance
     if (!isinstance) {
         PyErr_Format(PyExc_TypeError, "value should be an instance of '%s' or a dict", closure->type->tp_name);
         return -1;
@@ -545,42 +525,47 @@ struct_set_struct(StructObject *self, PyObject *value, struct_closure_t *closure
 }
 
 
+static int
+struct_init(StructObject *self, PyObject *args, PyObject *kwds, PyTypeObject *type, size_t size) 
+{
+    StructObject *copy = NULL;
+    // copy is a positional-only argument
+    if (!PyArg_ParseTuple(args, "|O!", type, &copy)) return -1;
+    
+    self->size = size;
+    self->data = PyMem_Malloc(size);
+    if (!self->data) return -1;
+    self->readonly = 0;
+    
+    Struct_register(self);
+    
+    if (copy) {
+        assert(self->size == copy->size); // should be same size, since same type
+        memcpy(self->data, copy->data, self->size);
+    } else {
+        memset(self->data, 0, self->size);
+    }
+    
+    self->owner = (PyObject *)self;
 
+    if (kwds) {
+        // all keyword arguments are attribute-assignments
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        
+        while (PyDict_Next(kwds, &pos, &key, &value)) {
+            if (PyObject_SetAttr((PyObject*)self, key, value)) return -1;
+        }   
+    }
+
+    return 0;
+}
 <<<structs:
 
 static int
 pylv_{name}_init(StructObject *self, PyObject *args, PyObject *kwds) 
 {{
-    StructObject *copy = NULL;
-    // copy is a positional-only argument
-    if (!PyArg_ParseTuple(args, "|O!", &pylv_{name}_Type, &copy)) return -1;
-    
-    self->size = sizeof(lv_{name});
-    self->data = PyMem_Malloc(self->size);
-    if (!self->data) return -1;
-    
-    Struct_register(self);
-    
-    if (copy) {{
-        assert(self->size == copy->size); // should be same size, since same type
-        memcpy(self->data, copy->data, self->size);
-    }} else {{
-        memset(self->data, 0, self->size);
-    }}
-    
-    self->owner = (PyObject *)self;
-
-    if (kwds) {{
-        // all keyword arguments are attribute-assignments
-        PyObject *key, *value;
-        Py_ssize_t pos = 0;
-        
-        while (PyDict_Next(kwds, &pos, &key, &value)) {{
-            if (PyObject_SetAttr((PyObject*)self, key, value)) return -1;
-        }}   
-    }}
-
-    return 0;
+    return struct_init(self, args, kwds, &pylv_{name}_Type, sizeof(lv_{name}));
 }}
 
 {getset}
@@ -639,6 +624,77 @@ static PyTypeObject pylv_{name}_Type = {{
 
 >>>
 
+/****************************************************************
+ * Custom types: constclass                                     *  
+ ****************************************************************/
+
+static PyType_Slot constclass_slots[] = {
+    {0, 0},
+};
+
+/* Create a new class which represents a set of constants
+ * Used for C enum constants, symbols and colors
+ *
+ * variadic arguments are char* name, <type> value, ... , NULL
+ * representing the enum values
+ *
+ * dtype: 'd' for integers, 's' for strings, 'C' for colors (lv_color_t)
+ *
+ */
+static PyObject* build_constclass(char dtype, char *name, ...) {
+
+    va_list args;
+    va_start(args, name);
+
+    PyType_Spec spec = {
+        .name = name,
+        .basicsize = sizeof(PyObject),
+        .itemsize = 0,
+        .flags = Py_TPFLAGS_DEFAULT,
+        .slots = constclass_slots /* terminated by slot==0. */
+    };
+    
+    PyObject *constclass_type = PyType_FromSpec(&spec);
+    if (!constclass_type) return NULL;
+    
+    ((PyTypeObject*)constclass_type)->tp_new = NULL; // objects cannot be instantiated
+    
+    while(1) {
+        char *name = va_arg(args, char*);
+        if (!name) break;
+        
+        PyObject *value=NULL;
+        lv_color_t color;
+        
+        switch(dtype) {
+            case 'd':
+                value = PyLong_FromLong(va_arg(args, int));
+                break;
+            case 's':
+                value = PyUnicode_FromString(va_arg(args, char *));
+                break;
+            case 'C':
+                color = va_arg(args, lv_color_t);
+                value = pystruct_from_c(&<<LV_COLOR_TYPE>>, &color, sizeof(lv_color_t), 1);
+                break;
+            default:
+                assert(0);
+        }
+        
+        if (!value) goto error;
+        
+        PyObject_SetAttrString(constclass_type, name, value);
+        Py_DECREF(value);
+    }
+
+    return constclass_type;
+
+error:
+    Py_DECREF(constclass_type);
+    return NULL;
+
+}
+
 
 /****************************************************************
  * Custom method implementations                                *
@@ -652,6 +708,7 @@ static PyTypeObject pylv_{name}_Type = {{
 static PyObject*
 pylv_obj_get_children(pylv_Obj *self, PyObject *args, PyObject *kwds)
 {
+    if (check_alive(self)) return NULL;
     lv_obj_t *child = NULL;
     PyObject *pychild;
     PyObject *ret = PyList_New(0);
@@ -681,6 +738,7 @@ pylv_obj_get_children(pylv_Obj *self, PyObject *args, PyObject *kwds)
 static PyObject*
 pylv_obj_get_type(pylv_Obj *self, PyObject *args, PyObject *kwds)
 {
+    if (check_alive(self)) return NULL;
     lv_obj_type_t result;
     PyObject *list = NULL;
     PyObject *str = NULL;
@@ -708,11 +766,45 @@ error:
     return NULL;
 }
 
+void pylv_event_cb(lv_obj_t *obj, lv_event_t event) {
+    pylv_Obj *self = (pylv_Obj *)*lv_obj_get_user_data_ptr(obj);
+    assert(self && self->event_cb);
+    
+    PyObject *result = PyObject_CallFunction(self->event_cb, "I", event);
+    
+    if (result) {
+        Py_DECREF(result);
+    } else {
+        PyErr_Print();
+        PyErr_Clear();
+    }
+    
+}
 
+static PyObject *
+pylv_obj_set_event_cb(pylv_Obj *self, PyObject *args, PyObject *kwds) {
+    if (check_alive(self)) return NULL;
+    static char *kwlist[] = {"event_cb", NULL};
+    PyObject *callback, *old_callback;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O", kwlist, &callback)) return NULL;
+    
+    old_callback = self->event_cb;
+    self->event_cb = callback;
+    Py_INCREF(callback);
+    Py_XDECREF(old_callback);
+    
+    LVGL_LOCK
+    lv_obj_set_event_cb(self->ref, pylv_event_cb);
+    LVGL_UNLOCK
+    
+    
+    Py_RETURN_NONE;
+}
 
 static PyObject*
 pylv_label_get_letter_pos(pylv_Label *self, PyObject *args, PyObject *kwds)
 {
+    if (check_alive(self)) return NULL;
     static char *kwlist[] = {"index", NULL};
     int index;
     lv_point_t pos;
@@ -728,6 +820,7 @@ pylv_label_get_letter_pos(pylv_Label *self, PyObject *args, PyObject *kwds)
 static PyObject*
 pylv_label_get_letter_on(pylv_Label *self, PyObject *args, PyObject *kwds)
 {
+    if (check_alive(self)) return NULL;
     static char *kwlist[] = {"pos", NULL};
     int x, y, index;
     lv_point_t pos;
@@ -749,6 +842,7 @@ pylv_label_get_letter_on(pylv_Label *self, PyObject *args, PyObject *kwds)
 static PyObject*
 pylv_list_add(pylv_List *self, PyObject *args, PyObject *kwds)
 {
+    if (check_alive(self)) return NULL;
     static char *kwlist[] = {"img_src", "txt", "rel_action", NULL};
     PyObject *img_src;
     const char *txt;
@@ -775,6 +869,7 @@ pylv_list_add(pylv_List *self, PyObject *args, PyObject *kwds)
 static PyObject*
 pylv_list_focus(pylv_List *self, PyObject *args, PyObject *kwds)
 {
+    if (check_alive(self)) return NULL;
     static char *kwlist[] = {"obj", "anim_en", NULL};
     pylv_Btn * obj;
     lv_obj_t *parent;
@@ -833,7 +928,7 @@ pylv_{name}_init(pylv_{pyname} *self, PyObject *args, PyObject *kwds)
     
     LVGL_LOCK
     self->ref = lv_{name}_create(parent ? parent->ref : NULL, copy ? copy->ref : NULL);
-    *lv_obj_get_user_data(self->ref) = self;
+    *lv_obj_get_user_data_ptr(self->ref) = self;
     Py_INCREF(self); // since reference is stored in lv_obj user data
     install_signal_cb(self);
     LVGL_UNLOCK
@@ -1039,6 +1134,8 @@ PyInit_lvgl(void) {
 <<ENUM_ASSIGNMENTS>>
 
 <<SYMBOL_ASSIGNMENTS>>
+
+<<COLOR_ASSIGNMENTS>>
 
 <<GLOBALS_ASSIGNMENTS>>
 
