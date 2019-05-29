@@ -57,7 +57,7 @@ class LvglSourceParser:
         self.lexer = pycparser.ply.lex.lex(module = pycparser.ply.cpp)
 
     def parse_file(self, filename):
-        args = ['-I../pycparser/utils/fake_libc_include']
+        args = ['-I./pycparser/utils/fake_libc_include']
         
         # TODO: preprocessor for Windows
         return pycparser.parse_file(filename, use_cpp=True, cpp_path='gcc', cpp_args=['-E'] + args)
